@@ -7,8 +7,6 @@ var EQ3MAX_DEV_TYPE_SHUTTER_CONTACT = 4;
 var EQ3MAX_DEV_TYPE_PUSH_BUTTON = 5;
 var EQ3MAX_DEV_TYPE_WINDOW_SWITCH = 6;
 var EQ3MAX_DEV_TYPE_UNKNOWN = 99;
-//temporary global var for device type
-var EQ3MAX_DEV_TYPE_TEMP = "foo";
 
 const StringDecoder = require('string_decoder').StringDecoder;
 const stringDecoder = new StringDecoder('utf8');
@@ -211,7 +209,7 @@ function decodeDevice (payload) {
     case 6: deviceType = EQ3MAX_DEV_TYPE_WINDOW_SWITCH; deviceStatus = decodeDeviceWindowSwitch (payload); break;
     case 8: deviceType = EQ3MAX_DEV_TYPE_PUSH_BUTTON; break;
     case 11: deviceType = EQ3MAX_DEV_TYPE_THERMOSTAT; deviceStatus = decodeDeviceThermostat (payload); break;
-    case 12: deviceType = EQ3MAX_DEV_TYPE_WALLTHERMOSTAT; EQ3MAX_DEV_TYPE_TEMP=deviceType; deviceStatus = decodeDeviceThermostat (payload); break;
+    case 12: deviceType = EQ3MAX_DEV_TYPE_WALLTHERMOSTAT; deviceStatus = decodeDeviceWallThermostat (payload); break;
     default: deviceType = EQ3MAX_DEV_TYPE_UNKNOWN; break;
   }
 
@@ -221,25 +219,22 @@ function decodeDevice (payload) {
 }
 
 function decodeDeviceWindowSwitch (payload) {
-   /*
-     According to https://github.com/Bouni/max-cube-protocol/blob/master/L-Message.md the information about
-     the window status is mapped in the lowest two bits in the flag word.
-   */
-   var open = false;
+  /*
+    According to https://github.com/Bouni/max-cube-protocol/blob/master/L-Message.md the information about
+    the window status is mapped in the lowest two bits in the flag word.
+  */
+  var open = false;
 
-  if (payload[6] & (1 << 1)) {
+  if ((payload[6] & (1 << 1)) > 0) {
     open = true;
   }
 
-   var deviceStatus = {
-     rf_address: payload.slice(1, 4).toString('hex'),
-     open: open,
-     battery_low: !!(payload[6] & (1 << 7)),
-   };
-
-   return deviceStatus;
- }
-
+  var deviceStatus = {
+    rf_address: payload.slice(1, 4).toString('hex'),
+    open: open,
+  };
+  return deviceStatus;
+}
 
 function decodeDeviceThermostat (payload) {
   /*
@@ -300,23 +295,57 @@ function decodeDeviceThermostat (payload) {
       valve: payload[7],
       setpoint: (payload[8] / 2)
     };
+
     if (mode === 'VACATION') {
     // from http://sourceforge.net/p/fhem/code/HEAD/tree/trunk/fhem/FHEM/10_MAX.pm#l573
       deviceStatus.date_until = 2000 + (payload[10] & 0x3F) + "-" + ("00" + (((payload[9] & 0xE0) >> 4) | (payload[10] >> 7))).substr(-2) + "-" + ("00" + (payload[9] & 0x1F)).substr(-2);
       var hours = (payload[11] & 0x3F) / 2;
       deviceStatus.time_until = ('00' + Math.floor(hours)).substr(-2) + ':' + ((hours % 1) ? "30" : "00");
     } else {
-      if (EQ3MAX_DEV_TYPE_TEMP == 3)
-      {
-      		deviceStatus.temp = (payload[11]?25.5:0) + payload[12] / 10;
-      }
-      else
-      {
-      		deviceStatus.temp = (payload[9]?25.5:0) + payload[10] / 10;
-      }
+      deviceStatus.temp = (payload[9]?25.5:0) + payload[10] / 10;
     }
-    EQ3MAX_DEV_TYPE_TEMP = "foo";
 
     return deviceStatus;
 }
+
+function decodeDeviceWallThermostat (payload) {
+
+  //regular device parsing
+  var deviceStatus = decodeDeviceThermostat (payload);
+
+  //wall thermostat has different temp and setpoint parsing:
+  //https://github.com/Bouni/max-cube-protocol/blob/master/L-Message.md#actual-temperature-wallmountedthermostat
+
+  /*
+  Actual Temperature (WallMountedThermostat)
+
+  11      Actual Temperature  1           219
+  Room temperature measured by the wall mounted thermostat in °C * 10. For example 0xDB = 219 = 21.9°C The temperature is represented by 9 bits; the 9th bit is available as the top bit at offset 8
+
+  offset|      8    | ... |     12    |
+  hex   |     B2    |     |     24    |
+  binary| 1011 0010 | ... | 0010 0100 |
+          | || ||||         |||| ||||
+          | ++-++++--------------------- temperature (°C*2):            110010 = 25.0°C
+          |                 |||| ||||
+          +-----------------++++-++++--- actual temperature (°C*10): 100100100 = 29.2°C
+
+  */
+
+  //offset 8 binary to extract only needed bit
+  var off8Bin= (payload[8] >>> 0).toString(2);
+
+  //offset8 without top bit (it is used by actual temperature and will corrupt the setpoint value)
+  var setPoint = parseInt(((off8Bin + '').substring(1)).replace(/[^01]/gi, ''), 2);
+  //C/2
+  deviceStatus.setpoint = setPoint / 2;
+
+  //get the TopBit and zero fill right to use it as 9 bit of offset 12
+  var off8TopBit =  parseInt(off8Bin.substring(0,1)) << 8;
+  //Bitwise OR offset 8/offset 12 and finally C/10 to read the actual temperature
+  deviceStatus.temp = (parseInt(off8TopBit) | parseInt(payload[12])) / 10;
+
+  return deviceStatus;
+}
+
 exports.parse = parse;
